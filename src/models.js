@@ -14,6 +14,7 @@ const isNestedReply = require("ssb-thread-schema/post/nested-reply/validator");
 const nullImage = `&${"0".repeat(43)}=.sha256`;
 
 const defaultOptions = {
+  keys: true,
   private: true,
   reverse: true,
   meta: true
@@ -517,7 +518,7 @@ module.exports = ({ cooler, isPublic }) => {
       const myFeedId = ssb.id;
 
       const options = configure({ id: feedId }, customOptions);
-      const source = await cooler.read(ssb.createUserStream, options);
+      const source = await cooler.read(ssb.createHistoryStream, options);
 
       const messages = await new Promise((resolve, reject) => {
         pull(
