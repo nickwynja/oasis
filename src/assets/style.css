@@ -134,8 +134,8 @@ section header a {
   margin-left: var(--micro);
 }
 
-section > footer > div > a,
-section > footer > div > form > button {
+section > footer a,
+section > footer form > button {
   color: var(--fg-status);
   font-weight: bold;
 }
@@ -293,10 +293,6 @@ section audio {
   width: 100%;
 }
 
-.content > :last-child {
-  margin-bottom: 0;
-}
-
 @media screen {
   html {
     min-height: 100%;
@@ -393,7 +389,6 @@ section > .centered-footer {
 }
 
 section > footer {
-  margin-top: var(--whole);
   color: var(--fg-status);
 }
 
