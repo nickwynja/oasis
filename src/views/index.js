@@ -1,9 +1,14 @@
 "use strict";
 
+const path = require("path");
+const envPaths = require("env-paths");
+const fs = require("fs");
+
 const debug = require("debug")("oasis");
 const highlightJs = require("highlight.js");
 
 const MarkdownIt = require("markdown-it");
+const prettyMs = require("pretty-ms");
 
 const {
   a,
@@ -46,9 +51,8 @@ const {
 const lodash = require("lodash");
 const markdown = require("./markdown");
 
-const md = new MarkdownIt();
-
 const i18nBase = require("./i18n");
+
 let selectedLanguage = "en";
 let i18n = i18nBase[selectedLanguage];
 
@@ -70,13 +74,31 @@ const toAttributes = (obj) =>
 // non-breaking space
 const nbsp = "\xa0";
 
-/**
- * @param {{href: string, emoji: string, text: string }} input
- */
-const navLink = ({ href, emoji, text }) =>
-  li(a({ href }, span({ class: "emoji" }, emoji), nbsp, text));
-
 const template = (titlePrefix, ...elements) => {
+  const navLink = ({ href, emoji, text }) =>
+    li(
+      a(
+        { href, class: titlePrefix === text ? "current" : "" },
+        span({ class: "emoji" }, emoji),
+        nbsp,
+        text
+      )
+    );
+
+  const customCSS = (filename) => {
+    const customStyleFile = path.join(
+      envPaths("oasis", { suffix: "" }).config,
+      filename
+    );
+    try {
+      if (fs.existsSync(customStyleFile)) {
+        return link({ rel: "stylesheet", href: filename });
+      }
+    } catch (error) {
+      return "";
+    }
+  };
+
   const nodes = html(
     { lang: "en" },
     head(
@@ -84,6 +106,7 @@ const template = (titlePrefix, ...elements) => {
       link({ rel: "stylesheet", href: "/theme.css" }),
       link({ rel: "stylesheet", href: "/assets/style.css" }),
       link({ rel: "stylesheet", href: "/assets/highlight.css" }),
+      customCSS("/custom-style.css"),
       link({ rel: "icon", type: "image/svg+xml", href: "/assets/favicon.svg" }),
       meta({ charset: "utf-8" }),
       meta({
@@ -201,7 +224,9 @@ const thread = (messages) => {
 
       const nextAuthor = lodash.get(nextMsg, "value.meta.author.name");
       const nextSnippet = postSnippet(
-        lodash.get(nextMsg, "value.content.text")
+        lodash.has(nextMsg, "value.content.contentWarning")
+          ? lodash.get(nextMsg, "value.content.contentWarning")
+          : lodash.get(nextMsg, "value.content.text")
       );
 
       msgList.push(summary(`${nextAuthor}: ${nextSnippet}`).outerHTML);
@@ -220,7 +245,10 @@ const thread = (messages) => {
   }
 
   const htmlStrings = lodash.flatten(msgList);
-  return div({}, { innerHTML: htmlStrings.join("") });
+  return div(
+    {},
+    { class: "thread-container", innerHTML: htmlStrings.join("") }
+  );
 };
 
 const postSnippet = (text) => {
@@ -334,7 +362,10 @@ const post = ({ msg, aside = false }) => {
   );
 
   const { name } = msg.value.meta.author;
-  const timeAgo = msg.value.meta.timestamp.received.since.replace("~", "");
+
+  const ts_received = msg.value.meta.timestamp.received;
+  const timeAgo = ts_received.since.replace("~", "");
+  const timeAbsolute = ts_received.iso8601.split(".")[0].replace("T", " ");
 
   const markdownContent = markdown(
     msg.value.content.text,
@@ -346,7 +377,6 @@ const post = ({ msg, aside = false }) => {
     : { value: 1, class: null };
 
   const likeCount = msg.value.meta.votes.length;
-
   const maxLikedNameLength = 16;
   const maxLikedNames = 16;
 
@@ -363,8 +393,22 @@ const post = ({ msg, aside = false }) => {
 
   const messageClasses = ["post"];
 
+  const recps = [];
+
+  const addRecps = (recpsInfo) => {
+    recpsInfo.forEach(function (recp) {
+      recps.push(
+        a(
+          { href: `/author/${encodeURIComponent(recp.feedId)}` },
+          img({ class: "avatar", src: recp.avatarUrl, alt: "" })
+        )
+      );
+    });
+  };
+
   if (isPrivate) {
     messageClasses.push("private");
+    addRecps(msg.value.meta.recpsInfo);
   }
 
   if (isThreadTarget) {
@@ -414,8 +458,12 @@ const post = ({ msg, aside = false }) => {
         ),
         span({ class: "author-action" }, postOptions[msg.value.meta.postType]),
         span(
-          { class: "time" },
+          {
+            class: "time",
+            title: timeAbsolute,
+          },
           isPrivate ? "🔒" : null,
+          isPrivate ? recps : null,
           a({ href: url.link }, nbsp, timeAgo)
         )
       )
@@ -505,13 +553,15 @@ exports.editProfileView = ({ name, description }) =>
   );
 
 /**
- * @param {{avatarUrl: string, description: string, feedId: string, messages: any[], name: string, relationship: object}} input
+ * @param {{avatarUrl: string, description: string, feedId: string, messages: any[], name: string, relationship: object, firstPost: object, lastPost: object}} input
  */
 exports.authorView = ({
   avatarUrl,
   description,
   feedId,
   messages,
+  firstPost,
+  lastPost,
   name,
   relationship,
 }) => {
@@ -600,14 +650,81 @@ exports.authorView = ({
     )
   );
 
-  return template(
-    i18n.profile,
-    prefix,
-    messages.map((msg) => post({ msg }))
+  const linkUrl = relationship.me
+    ? "/profile/"
+    : `/author/${encodeURIComponent(feedId)}/`;
+
+  let items = messages.map((msg) => post({ msg }));
+  if (items.length === 0) {
+    if (lastPost === undefined) {
+      items.push(section(div(span(i18n.feedEmpty))));
+    } else {
+      items.push(
+        section(
+          div(
+            span(i18n.feedRangeEmpty),
+            a({ href: `${linkUrl}` }, i18n.seeFullFeed)
+          )
+        )
+      );
+    }
+  } else {
+    const highestSeqNum = messages[0].value.sequence;
+    const lowestSeqNum = messages[messages.length - 1].value.sequence;
+    let newerPostsLink;
+    if (lastPost !== undefined && highestSeqNum < lastPost.value.sequence)
+      newerPostsLink = a(
+        { href: `${linkUrl}?gt=${highestSeqNum}` },
+        i18n.newerPosts
+      );
+    else newerPostsLink = span(i18n.newerPosts, { title: i18n.noNewerPosts });
+    let olderPostsLink;
+    if (lowestSeqNum > firstPost.value.sequence)
+      olderPostsLink = a(
+        { href: `${linkUrl}?lt=${lowestSeqNum}` },
+        i18n.olderPosts
+      );
+    else
+      olderPostsLink = span(i18n.olderPosts, { title: i18n.beginningOfFeed });
+    const pagination = section(
+      { class: "message" },
+      footer(div(newerPostsLink, olderPostsLink), br())
+    );
+    items.unshift(pagination);
+    items.push(pagination);
+  }
+
+  return template(i18n.profile, prefix, items);
+};
+
+exports.previewCommentView = async ({
+  previewData,
+  messages,
+  myFeedId,
+  parentMessage,
+  contentWarning,
+}) => {
+  const publishAction = `/comment/${encodeURIComponent(messages[0].key)}`;
+
+  const preview = generatePreview({
+    previewData,
+    contentWarning,
+    action: publishAction,
+  });
+  return exports.commentView(
+    { messages, myFeedId, parentMessage },
+    preview,
+    previewData.text,
+    contentWarning
   );
 };
 
-exports.commentView = async ({ messages, myFeedId, parentMessage }) => {
+exports.commentView = async (
+  { messages, myFeedId, parentMessage },
+  preview,
+  text,
+  contentWarning
+) => {
   let markdownMention;
 
   const messageElements = await Promise.all(
@@ -625,7 +742,7 @@ exports.commentView = async ({ messages, myFeedId, parentMessage }) => {
     })
   );
 
-  const action = `/comment/${encodeURIComponent(messages[0].key)}`;
+  const action = `/comment/preview/${encodeURIComponent(messages[0].key)}`;
   const method = "post";
 
   const isPrivate = parentMessage.value.meta.private;
@@ -636,27 +753,35 @@ exports.commentView = async ({ messages, myFeedId, parentMessage }) => {
 
   return template(
     i18n.commentTitle({ authorName }),
-    messageElements,
+    div({ class: "thread-container" }, messageElements),
+    preview !== undefined ? preview : "",
     p(
       ...i18n.commentLabel({ publicOrPrivate, markdownUrl }),
       ...maybeSubtopicText
     ),
     form(
-      { action, method },
+      { action, method, enctype: "multipart/form-data" },
       textarea(
         {
           autofocus: true,
           required: true,
           name: "text",
         },
-        isPrivate ? null : markdownMention
+        text ? text : isPrivate ? null : markdownMention
       ),
-      button(
-        {
-          type: "submit",
-        },
-        i18n.comment
-      )
+      label(
+        i18n.contentWarningLabel,
+        input({
+          name: "contentWarning",
+          type: "text",
+          class: "contentWarning",
+          value: contentWarning ? contentWarning : "",
+          placeholder: i18n.contentWarningPlaceholder,
+        })
+      ),
+      button({ type: "submit" }, i18n.preview),
+      label({ class: "file-button", for: "blob" }, i18n.attachFiles),
+      input({ type: "file", id: "blob", name: "blob" })
     )
   );
 };
@@ -720,6 +845,9 @@ exports.threadView = ({ messages }) => {
   return template([`@${rootAuthorName}: `, rootSnippet], thread(messages));
 };
 
+// this view is only used for the /settings/readme page.
+// To fix style glitches it uses the default MarkdownIt and not ssb-markdown.
+const md = new MarkdownIt();
 exports.markdownView = ({ text }) => {
   const rawHtml = md.render(text);
 
@@ -729,18 +857,20 @@ exports.markdownView = ({ text }) => {
   );
 };
 
-exports.publishView = () => {
-  const publishForm = "/publish/";
-
+exports.publishView = (preview, text, contentWarning) => {
   return template(
     i18n.publish,
     section(
       h1(i18n.publish),
       form(
-        { action: publishForm, method: "post" },
+        {
+          action: "/publish/preview",
+          method: "post",
+          enctype: "multipart/form-data",
+        },
         label(
           i18n.publishLabel({ markdownUrl, linkTarget: "_blank" }),
-          textarea({ required: true, name: "text" })
+          textarea({ required: true, name: "text" }, text ? text : "")
         ),
         label(
           i18n.contentWarningLabel,
@@ -748,28 +878,152 @@ exports.publishView = () => {
             name: "contentWarning",
             type: "text",
             class: "contentWarning",
+            value: contentWarning ? contentWarning : "",
             placeholder: i18n.contentWarningPlaceholder,
           })
         ),
-        button({ type: "submit" }, i18n.submit)
+        button({ type: "submit" }, i18n.preview),
+        label({ class: "file-button", for: "blob" }, i18n.attachFiles),
+        input({ type: "file", id: "blob", name: "blob" })
       )
     ),
+    preview ? preview : "",
     p(i18n.publishCustomInfo({ href: "/publish/custom" }))
   );
+};
+
+const generatePreview = ({ previewData, contentWarning, action }) => {
+  const { authorMeta, text, mentions } = previewData;
+
+  // craft message that looks like it came from the db
+  // cb: this kinda fragile imo? this is for getting a proper post styling ya?
+  const msg = {
+    key: "%non-existent.preview",
+    value: {
+      author: authorMeta.id,
+      // sequence: -1,
+      content: {
+        type: "post",
+        text: text,
+      },
+      timestamp: Date.now(),
+      meta: {
+        isPrivate: true,
+        votes: [],
+        author: {
+          name: authorMeta.name,
+          avatar: {
+            url: `/image/64/${encodeURIComponent(authorMeta.image)}`,
+          },
+        },
+      },
+    },
+  };
+  if (contentWarning) msg.value.content.contentWarning = contentWarning;
+  const ts = new Date(msg.value.timestamp);
+  lodash.set(msg, "value.meta.timestamp.received.iso8601", ts.toISOString());
+  const ago = Date.now() - Number(ts);
+  const prettyAgo = prettyMs(ago, { compact: true });
+  lodash.set(msg, "value.meta.timestamp.received.since", prettyAgo);
+  return div(
+    Object.keys(mentions).length === 0
+      ? ""
+      : section(
+          { class: "mention-suggestions" },
+          h2(i18n.mentionsMatching),
+          Object.keys(mentions).map((name) => {
+            let matches = mentions[name];
+
+            return div(
+              matches.map((m) => {
+                let relationship = { emoji: "", desc: "" };
+                if (m.rel.followsMe && m.rel.following) {
+                  // mutuals get the handshake emoji
+                  relationship.emoji = "🤝";
+                  relationship.desc = i18n.relationshipMutuals;
+                } else if (m.rel.following) {
+                  // if we're following that's an eyes emoji
+                  relationship.emoji = "👀";
+                  relationship.desc = i18n.relationshipFollowing;
+                } else if (m.rel.followsMe) {
+                  // follower has waving-hand emoji
+                  relationship.emoji = "👋";
+                  relationship.desc = i18n.relationshipTheyFollow;
+                } else {
+                  // no relationship has question mark emoji
+                  relationship.emoji = "❓";
+                  relationship.desc = i18n.relationshipNotFollowing;
+                }
+                return div(
+                  { class: "mentions-container" },
+                  a(
+                    {
+                      class: "mentions-image",
+                      href: `/author/${encodeURIComponent(m.feed)}`,
+                    },
+                    img({ src: `/image/64/${encodeURIComponent(m.img)}` })
+                  ),
+                  a(
+                    {
+                      class: "mentions-name",
+                      href: `/author/${encodeURIComponent(m.feed)}`,
+                    },
+                    m.name
+                  ),
+                  div(
+                    { class: "emo-rel" },
+                    span(
+                      { class: "emoji", title: relationship.desc },
+                      relationship.emoji
+                    ),
+                    span(
+                      { class: "mentions-listing" },
+                      `[@${m.name}](${m.feed})`
+                    )
+                  )
+                );
+              })
+            );
+          })
+        ),
+    section(
+      { class: "post-preview" },
+      post({ msg }),
+
+      // doesn't need blobs, preview adds them to the text
+      form(
+        { action, method: "post" },
+        input({
+          name: "contentWarning",
+          type: "hidden",
+          value: contentWarning,
+        }),
+        input({
+          name: "text",
+          type: "hidden",
+          value: text,
+        }),
+        button({ type: "submit" }, i18n.publish)
+      )
+    )
+  );
+};
+
+exports.previewView = ({ previewData, contentWarning }) => {
+  const publishAction = "/publish";
+
+  const preview = generatePreview({
+    previewData,
+    contentWarning,
+    action: publishAction,
+  });
+  return exports.publishView(preview, previewData.text, contentWarning);
 };
 
 /**
  * @param {{status: object, peers: any[], theme: string, themeNames: string[], version: string }} input
  */
-exports.settingsView = ({ status, peers, theme, themeNames, version }) => {
-  const max = status.sync.since;
-
-  const progressElements = Object.entries(status.sync.plugins).map((e) => {
-    const [key, val] = e;
-    const id = `progress-${key}`;
-    return div(label(key, progress({ id, value: val, max }, val)));
-  });
-
+exports.settingsView = ({ peers, theme, themeNames, version }) => {
   const startButton = form(
     { action: "/settings/conn/start", method: "post" },
     button({ type: "submit" }, i18n.startNetworking)
@@ -847,6 +1101,11 @@ exports.settingsView = ({ status, peers, theme, themeNames, version }) => {
       ? option({ value: shortName, selected: true }, longName)
       : option({ value: shortName }, longName);
 
+  const rebuildButton = form(
+    { action: "/settings/rebuild", method: "post" },
+    button({ type: "submit" }, i18n.rebuildName)
+  );
+
   return template(
     i18n.settings,
     section(
@@ -879,18 +1138,19 @@ exports.settingsView = ({ status, peers, theme, themeNames, version }) => {
         { action: "/language", method: "post" },
         select({ name: "language" }, [
           // Languages are sorted alphabetically by their 'long name'.
-          /* cspell:disable */
+          /* spell-checker:disable */
           languageOption("Deutsch", "de"),
           languageOption("English", "en"),
           languageOption("Español", "es"),
           languageOption("Français", "fr"),
           languageOption("Italiano", "it"),
-          /* cspell:enable */
+          /* spell-checker:enable */
         ]),
         button({ type: "submit" }, i18n.setLanguage)
       ),
       h2(i18n.indexes),
-      progressElements
+      p(i18n.indexesDescription),
+      rebuildButton
     )
   );
 };
@@ -990,8 +1250,34 @@ exports.threadsView = ({ messages }) => {
   });
 };
 
-exports.subtopicView = async ({ messages, myFeedId }) => {
-  const subtopicForm = `/subtopic/${encodeURIComponent(
+exports.previewSubtopicView = async ({
+  previewData,
+  messages,
+  myFeedId,
+  contentWarning,
+}) => {
+  const publishAction = `/subtopic/${encodeURIComponent(messages[0].key)}`;
+
+  const preview = generatePreview({
+    previewData,
+    contentWarning,
+    action: publishAction,
+  });
+  return exports.subtopicView(
+    { messages, myFeedId },
+    preview,
+    previewData.text,
+    contentWarning
+  );
+};
+
+exports.subtopicView = async (
+  { messages, myFeedId },
+  preview,
+  text,
+  contentWarning
+) => {
+  const subtopicForm = `/subtopic/preview/${encodeURIComponent(
     messages[messages.length - 1].key
   )}`;
 
@@ -1016,24 +1302,32 @@ exports.subtopicView = async ({ messages, myFeedId }) => {
 
   return template(
     i18n.subtopicTitle({ authorName }),
-    messageElements,
+    div({ class: "thread-container" }, messageElements),
+    preview !== undefined ? preview : "",
     p(i18n.subtopicLabel({ markdownUrl })),
     form(
-      { action: subtopicForm, method: "post" },
+      { action: subtopicForm, method: "post", enctype: "multipart/form-data" },
       textarea(
         {
           autofocus: true,
           required: true,
           name: "text",
         },
-        markdownMention
+        text ? text : markdownMention
       ),
-      button(
-        {
-          type: "submit",
-        },
-        i18n.subtopic
-      )
+      label(
+        i18n.contentWarningLabel,
+        input({
+          name: "contentWarning",
+          type: "text",
+          class: "contentWarning",
+          value: contentWarning ? contentWarning : "",
+          placeholder: i18n.contentWarningPlaceholder,
+        })
+      ),
+      button({ type: "submit" }, i18n.preview),
+      label({ class: "file-button", for: "blob" }, i18n.attachFiles),
+      input({ type: "file", id: "blob", name: "blob" })
     )
   );
 };
