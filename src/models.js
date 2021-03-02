@@ -865,6 +865,9 @@ module.exports = ({ cooler, isPublic }) => {
           );
         }
 
+        const { blocking } = await models.friend.getRelationship(msg.value.author);
+        lodash.set(msg, "value.meta.blocking", blocking);
+
         return msg;
       })
     );
@@ -1176,107 +1179,20 @@ module.exports = ({ cooler, isPublic }) => {
 
       return messages;
     },
-    latestTopics: async () => {
-      const ssb = await cooler.open();
-
-      const myFeedId = ssb.id;
-
-      const source = ssb.query.read(
-        configure({
-          query: [
-            {
-              $filter: {
-                value: {
-                  timestamp: { $lte: Date.now() },
-                  content: {
-                    type: { $in: ["post", "blog"] },
-                  },
-                },
-              },
-            },
-          ],
-        })
-      );
-
-      const extendedFilter = await socialFilter({
-        following: true,
-      });
-
-      const messages = await new Promise((resolve, reject) => {
-        pull(
-          source,
-          publicOnlyFilter,
-          pull.filter(hasNoRoot),
-          extendedFilter,
-          pull.take(maxMessages),
-          pull.collect((err, collectedMessages) => {
-            if (err) {
-              reject(err);
-            } else {
-              resolve(transform(ssb, collectedMessages, myFeedId));
-            }
-          })
-        );
-      });
-
-      return messages;
-    },
-    latestSummaries: async () => {
-      const ssb = await cooler.open();
-
-      const myFeedId = ssb.id;
-
-      const options = configure({
-        type: "post",
-        private: false,
-      });
-
-      const source = ssb.messagesByType(options);
-
-      const extendedFilter = await socialFilter({
-        following: true,
-      });
-
-      const messages = await new Promise((resolve, reject) => {
-        pull(
-          source,
-          pull.filter((message) => isNotPrivate(message) && hasNoRoot(message)),
-          extendedFilter,
-          pull.take(maxMessages),
-          pullParallelMap(async (message, cb) => {
-            // Retrieve a preview of this post's comments / thread
-            const thread = await post.fromThread(message.key);
-            lodash.set(
-              message,
-              "value.meta.thread",
-              await transform(ssb, thread, myFeedId)
-            );
-            cb(null, message);
-          }),
-          pull.collect((err, collectedMessages) => {
-            if (err) {
-              reject(err);
-            } else {
-              resolve(transform(ssb, collectedMessages, myFeedId));
-            }
-          })
-        );
-      });
-
-      return messages;
-    },
     latestThreads: async () => {
       const ssb = await cooler.open();
 
       const myFeedId = ssb.id;
 
+      const d = new Date();
+
       const source = ssb.query.read(
         configure({
           query: [
             {
               $filter: {
                 value: {
-                  timestamp: { $lte: Date.now() },
+                  timestamp: { $gte: d.setMonth(d.getMonth()-1) },
                   content: {
                     type: { $in: ["post", "blog"] },
                   },
@@ -1286,9 +1202,9 @@ module.exports = ({ cooler, isPublic }) => {
           ],
         })
       );
-      const basicSocialFilter = await socialFilter();
+      const basicSocialFilter = await socialFilter( {blocking: false});
 
-      const basicSocialFilter = await socialFilter();
+      // const basicSocialFilter = await socialFilter();
       const messages = await new Promise((resolve, reject) => {
         pull(
           source,
@@ -1298,10 +1214,11 @@ module.exports = ({ cooler, isPublic }) => {
           pullParallelMap(async (message, cb) => {
             // Retrieve a preview of this post's comments / thread
             const thread = await post.fromThread(message.key);
+            const t = thread.filter(msg => !msg.value.meta.blocking);
             lodash.set(
               message,
               "value.meta.thread",
-              await transform(ssb, thread, myFeedId)
+              await transform(ssb, t, myFeedId)
             );
             cb(null, message);
           }),

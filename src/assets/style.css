@@ -585,7 +585,7 @@ hr {
     justify-content: right;
     flex-direction: column;
     margin-right: var(--size-1);
-    position: sticky;
+    /* position: sticky; */
     top: var(--size-0);
   }
   body > nav > ul > li {
@@ -664,6 +664,18 @@ section.post-preview {
 }
 
 section.post-preview > section > footer {
+  display: none;
+}
+
+section.post.blocked {
+  font-style: italic;
+}
+
+section.post.blocked:before {
+  content:'This message hides content from a blocked user.';
+}
+
+section.post.blocked > * {
   display: none;
 }
 
